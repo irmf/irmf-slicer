@@ -1,6 +1,6 @@
 module github.com/gmlewis/irmf-slicer/v3
 
-go 1.20
+go 1.25
 
 require (
 	github.com/gmlewis/stldice/v4 v4.0.0

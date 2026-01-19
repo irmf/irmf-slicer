@@ -1,4 +1,4 @@
-# [IRMF Shader](https://github.com/gmlewis/irmf) Slicer
+# [IRMF Shader](https://irmf.io) Slicer
 
 [![Test Status](https://github.com/gmlewis/irmf-slicer/workflows/Go/badge.svg)](https://github.com/gmlewis/irmf-slicer/actions?query=workflow%3AGo)
 
@@ -6,19 +6,18 @@
 
 ## Summary
 
-IRMF is a file format used to describe [GLSL
-ES](https://en.wikipedia.org/wiki/OpenGL_ES) shaders that define the
-materials in a 3D object with infinite resolution. IRMF completely
-eliminates the need for [software
-slicers](https://en.wikipedia.org/wiki/Slicer_(3D_printing)),
+IRMF is a file format used to describe
+[GLSL ES](https://en.wikipedia.org/wiki/OpenGL_ES) or
+[WGSL](https://www.w3.org/TR/WGSL/) shaders that define the
+materials in a 3D object with infinite resolution. IRMF
+eliminates the need for [software slicers](https://en.wikipedia.org/wiki/Slicer_(3D_printing)),
 [STL](https://en.wikipedia.org/wiki/STL_(file_format)), and
 [G-code](https://en.wikipedia.org/wiki/G-code) files used in
 [3D printers](https://en.wikipedia.org/wiki/3D_printing).
 
 I believe that IRMF shaders will some day revolutionize the 3D-printing industry.
 
-See [github.com/gmlewis/irmf](https://github.com/gmlewis/irmf) for more
-details.
+See [irmf.io](https://irmf.io) for more details.
 
 ## LYGIA support
 
@@ -39,7 +38,7 @@ for the amazing tool [glslViewer](https://github.com/patriciogonzalezvivo/glslVi
 
 ## About the IRMF Shader Slicer
 
-The technology stack used is Go and OpenGL.
+The technology stack used is Go and OpenGL or WebGPU.
 
 This program is needed to bridge the gap until 3D printer manufacturers
 adopt IRMF shaders and printable file formats in addition to G-Code
@@ -48,15 +47,15 @@ or into voxel slices (with various output file formats).
 For STL files, it outputs one STL file per material.
 (Note that some STL files can become enormous, way larger than any online
 service bureau currently supports. The resolution can be reduced to limit
-the STL file sizes, but at the expense of lossed detail.)
+the STL file sizes, but at the expense of detail loss.)
 
-For voxel slices, it can write them out to ZIP files (one ZIP file per material).
+For voxel slices, `irmf-slicer` can write them out to ZIP files (one ZIP file per material).
 These slices can then be fed to 3D printer software that accepts
-voxel slices as input for printing (such as [NanoDLP](https://www.nanodlp.com/)).
+voxel slices as input for printing (such as [NanoDLP](https://www.nano3dtech.com/)).
 
 For resin printers using either the [ChiTuBox](https://www.chitubox.com/) or
-[AnyCubic](https://www.anycubic.com/products/anycubic-photon-3d-printer) slicer
-(such as the [Elegoo Mars](https://www.elegoo.com/product/elegoo-mars-uv-photocuring-lcd-3d-printer/)),
+[AnyCubic](https://store.anycubic.com/collections/resin-3d-printer) slicer
+(such as the [Elegoo Mars](https://us.elegoo.com/collections/mars-series)),
 the `-dlp` option will output the voxel slices to the `.cbddlp` file
 format (which is identical to the `.photon` file format).
 
@@ -75,7 +74,7 @@ $ go install github.com/gmlewis/irmf-slicer/v3/cmd/irmf-slicer
 ```
 
 Then you might want to try it out on some of the [example IRMF
-shaders](https://github.com/gmlewis/irmf#examples) located on GitHub.
+shaders](https://github.com/gmlewis/irmf-examples?tab=readme-ov-file#examples) located on GitHub.
 
 To slice one or more `.irmf` files, just list them on the command line,
 like this:
@@ -102,7 +101,7 @@ option of NanoDLP.
 
 Using the `-dlp` option, the result is one `.cbddlp` file per model material
 that can be loaded into the [ChiTuBox](https://www.chitubox.com/) or
-[AnyCubic](https://www.anycubic.com/products/anycubic-photon-3d-printer)
+[AnyCubic](https://store.anycubic.com/collections/resin-3d-printer)
 slicer directly (`.cbddlp` is identical to the `.photon` file format).
 
 Using the `-stl` option, the result is one STL file per model material.

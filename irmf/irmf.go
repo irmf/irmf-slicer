@@ -17,19 +17,21 @@ import (
 
 // IRMF represents an IRMF shader.
 type IRMF struct {
-	Author    string          `json:"author"`
-	Copyright string          `json:"copyright"`
-	Date      string          `json:"date"`
-	Encoding  *string         `json:"encoding,omitempty"`
-	IRMF      string          `json:"irmf"`
-	Materials []string        `json:"materials"`
-	Max       []float32       `json:"max"`
-	Min       []float32       `json:"min"`
-	Notes     string          `json:"notes"`
-	Options   json.RawMessage `json:"options"`
-	Title     string          `json:"title"`
-	Units     string          `json:"units"`
-	Version   string          `json:"version"`
+	Author      string          `json:"author,omitempty"`
+	License     string          `json:"license,omitempty"`
+	Date        string          `json:"date,omitempty"`
+	Encoding    *string         `json:"encoding,omitempty"`
+	IRMFVersion string          `json:"irmf"`
+	GLSLVersion string          `json:"glslVersion,omitempty"`
+	Language    string          `json:"language"`
+	Materials   []string        `json:"materials"`
+	Max         []float32       `json:"max"`
+	Min         []float32       `json:"min"`
+	Notes       string          `json:"notes,omitempty"`
+	Options     json.RawMessage `json:"options,omitempty"`
+	Title       string          `json:"title,omitempty"`
+	Units       string          `json:"units"`
+	Version     string          `json:"version,omitempty"`
 
 	Shader string `json:"-"`
 }
@@ -37,9 +39,12 @@ type IRMF struct {
 var (
 	jsonKeys = []string{
 		"author",
-		"copyright",
+		"license",
 		"date",
+		"encoding",
 		"irmf",
+		"glslVersion",
+		"language",
 		"materials",
 		"max",
 		"min",
@@ -50,8 +55,6 @@ var (
 		"version",
 	}
 	trailingCommaRE = regexp.MustCompile(`,[\s\n]*}`)
-	arrayRE         = regexp.MustCompile(`\[([^\]]+)\]`)
-	whitespaceRE    = regexp.MustCompile(`[\s\n]+`)
 )
 
 // newModel parses the IRMF source file and returns a new IRMF struct.
@@ -121,6 +124,7 @@ func parseJSON(s string) (*IRMF, error) {
 	s = trailingCommaRE.ReplaceAllString(s, "}")
 
 	if err := json.Unmarshal([]byte(s), result); err != nil {
+		// This allows the user to omit quotes around keys:
 		for _, key := range jsonKeys {
 			s = strings.Replace(s, key+":", fmt.Sprintf("%q:", key), 1)
 		}
@@ -132,8 +136,8 @@ func parseJSON(s string) (*IRMF, error) {
 }
 
 func (i *IRMF) validate(jsonBlobStr, shaderSrc string) (int, error) {
-	if i.IRMF != "1.0" {
-		return findKeyLine(jsonBlobStr, "irmf"), fmt.Errorf("unsupported IRMF version: %v", i.IRMF)
+	if i.IRMFVersion != "1.0" {
+		return findKeyLine(jsonBlobStr, "irmf"), fmt.Errorf("unsupported IRMF version: %v", i.IRMFVersion)
 	}
 	if len(i.Materials) < 1 {
 		return findKeyLine(jsonBlobStr, "materials"), errors.New("must list at least one material name")
@@ -160,15 +164,15 @@ func (i *IRMF) validate(jsonBlobStr, shaderSrc string) (int, error) {
 		return findKeyLine(jsonBlobStr, "max"), fmt.Errorf("min.z (%v) must be strictly less than max.z (%v)", i.Min[2], i.Max[2])
 	}
 
-	if len(i.Materials) <= 4 && strings.Index(shaderSrc, "mainModel4") < 0 {
+	if len(i.Materials) <= 4 && !strings.Contains(shaderSrc, "mainModel4") {
 		return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel4' function", len(i.Materials))
 	}
 
-	if len(i.Materials) > 4 && len(i.Materials) <= 9 && strings.Index(shaderSrc, "mainModel9") < 0 {
+	if len(i.Materials) > 4 && len(i.Materials) <= 9 && !strings.Contains(shaderSrc, "mainModel9") {
 		return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel9' function", len(i.Materials))
 	}
 
-	if len(i.Materials) > 9 && len(i.Materials) <= 16 && strings.Index(shaderSrc, "mainModel16") < 0 {
+	if len(i.Materials) > 9 && len(i.Materials) <= 16 && !strings.Contains(shaderSrc, "mainModel16") {
 		return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel16' function", len(i.Materials))
 	}
 
@@ -195,23 +199,6 @@ func findKeyLine(s, key string) int {
 func indexToLineNum(s string, offset int) int {
 	s = s[:offset]
 	return strings.Count(s, "\n") + 1
-}
-
-func (i *IRMF) format(shaderSrc string) (string, error) {
-	buf, err := json.MarshalIndent(i, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("unable to format IRMF shader: %v", err)
-	}
-
-	jsonBlob := string(buf)
-
-	// Clean up the JSON.
-	jsonBlob = strings.Replace(jsonBlob, `"options": null,`, `"options": {},`, 1)
-	jsonBlob = arrayRE.ReplaceAllStringFunc(jsonBlob, func(s string) string {
-		return whitespaceRE.ReplaceAllString(s, "")
-	})
-
-	return fmt.Sprintf("/*%v*/\n%v", jsonBlob, shaderSrc), nil
 }
 
 func curl(url string) ([]byte, error) {

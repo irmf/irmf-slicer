@@ -12,8 +12,8 @@ package main
 
 import (
 	"flag"
-	"io/ioutil"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/gmlewis/irmf-slicer/v3/binvox"
@@ -66,7 +66,7 @@ func main() {
 		}
 
 		log.Printf("Processing IRMF shader %q...", arg)
-		buf, err := ioutil.ReadFile(arg)
+		buf, err := os.ReadFile(arg)
 		check("ReadFile: %v", err)
 
 		err = slicer.NewModel(buf)

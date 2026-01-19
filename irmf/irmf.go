@@ -164,16 +164,33 @@ func (i *IRMF) validate(jsonBlobStr, shaderSrc string) (int, error) {
 		return findKeyLine(jsonBlobStr, "max"), fmt.Errorf("min.z (%v) must be strictly less than max.z (%v)", i.Min[2], i.Max[2])
 	}
 
-	if len(i.Materials) <= 4 && !strings.Contains(shaderSrc, "mainModel4") {
-		return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel4' function", len(i.Materials))
-	}
+	switch i.Language {
+	case "glsl", "":
+		if len(i.Materials) <= 4 && !strings.Contains(shaderSrc, "mainModel4") {
+			return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel4' function", len(i.Materials))
+		}
 
-	if len(i.Materials) > 4 && len(i.Materials) <= 9 && !strings.Contains(shaderSrc, "mainModel9") {
-		return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel9' function", len(i.Materials))
-	}
+		if len(i.Materials) > 4 && len(i.Materials) <= 9 && !strings.Contains(shaderSrc, "mainModel9") {
+			return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel9' function", len(i.Materials))
+		}
 
-	if len(i.Materials) > 9 && len(i.Materials) <= 16 && !strings.Contains(shaderSrc, "mainModel16") {
-		return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel16' function", len(i.Materials))
+		if len(i.Materials) > 9 && len(i.Materials) <= 16 && !strings.Contains(shaderSrc, "mainModel16") {
+			return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'mainModel16' function", len(i.Materials))
+		}
+	case "wgsl":
+		if len(i.Materials) <= 4 && !strings.Contains(shaderSrc, "fn mainModel4") {
+			return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'fn mainModel4' function", len(i.Materials))
+		}
+
+		if len(i.Materials) > 4 && len(i.Materials) <= 9 && !strings.Contains(shaderSrc, "fn mainModel9") {
+			return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'fn mainModel9' function", len(i.Materials))
+		}
+
+		if len(i.Materials) > 9 && len(i.Materials) <= 16 && !strings.Contains(shaderSrc, "fn mainModel16") {
+			return findKeyLine(jsonBlobStr, "materials"), fmt.Errorf("Found %v materials, but missing 'fn mainModel16' function", len(i.Materials))
+		}
+	default:
+		return findKeyLine(jsonBlobStr, "language"), fmt.Errorf("unsupported language: %v", i.Language)
 	}
 
 	if i.Encoding != nil && *i.Encoding != "" && *i.Encoding != "gzip" && *i.Encoding != "gzip+base64" {
@@ -238,7 +255,7 @@ func parseIncludeURL(trimmed string) string {
 	}
 
 	inc := m[1]
-	if !strings.HasSuffix(inc, ".glsl") {
+	if !strings.HasSuffix(inc, ".glsl") && !strings.HasSuffix(inc, ".wgsl") {
 		return ""
 	}
 

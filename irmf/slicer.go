@@ -5,10 +5,7 @@ import (
 	"image"
 	"log"
 	"runtime"
-	"strings"
 
-	"github.com/go-gl/gl/v4.1-core/gl"
-	"github.com/go-gl/glfw/v3.3/glfw"
 	"github.com/go-gl/mathgl/mgl32"
 )
 
@@ -22,19 +19,12 @@ type Slicer struct {
 	irmf   *IRMF
 	width  int
 	height int
-	window *glfw.Window
 	deltaX float32 // millimeters (model units)
 	deltaY float32
 	deltaZ float32
 	view   bool
 
-	program uint32
-	model   mgl32.Mat4
-	vao     uint32
-
-	modelUniform        int32
-	uMaterialNumUniform int32
-	uSliceUniform       int32 // u_slice => x, y, or z
+	renderer Renderer
 }
 
 // Init returns a new Slicer instance.
@@ -46,17 +36,42 @@ func Init(view bool, umXRes, umYRes, umZRes float32) *Slicer {
 // NewModel prepares the slicer to slice a new shader model.
 func (s *Slicer) NewModel(shaderSrc []byte) error {
 	irmf, err := newModel(shaderSrc)
+	if err != nil {
+		return err
+	}
 	s.irmf = irmf
-	return err
+
+	// Select renderer based on language.
+	// We might want to delay this until PrepareRender, but for now we can do it here.
+	switch irmf.Language {
+	case "glsl", "":
+		if _, ok := s.renderer.(*OpenGLRenderer); !ok {
+			if s.renderer != nil {
+				s.renderer.Close()
+			}
+			s.renderer = &OpenGLRenderer{}
+		}
+	case "wgsl":
+		if _, ok := s.renderer.(*WebGPURenderer); !ok {
+			if s.renderer != nil {
+				s.renderer.Close()
+			}
+			s.renderer = &WebGPURenderer{}
+		}
+	}
+
+	return nil
 }
 
 func (s *Slicer) IRMF() *IRMF {
 	return s.irmf
 }
 
-// Close closes the GLFW window and releases any Slicer resources.
+// Close closes the renderer and releases any Slicer resources.
 func (s *Slicer) Close() {
-	glfw.Terminate()
+	if s.renderer != nil {
+		s.renderer.Close()
+	}
 }
 
 // NumMaterials returns the number of materials in the most recent IRMF model.
@@ -85,36 +100,6 @@ func (s *Slicer) MBB() (min, max [3]float32) {
 		max[0], max[1], max[2] = s.irmf.Max[0], s.irmf.Max[1], s.irmf.Max[2]
 	}
 	return min, max
-}
-
-func (s *Slicer) createOrResizeWindow(width, height int) {
-	log.Printf("createOrResizeWindow(%v,%v)", width, height)
-	if s.window != nil {
-		glfw.Terminate()
-	}
-	s.width = width
-	s.height = height
-
-	err := glfw.Init()
-	check("glfw.Init: %v", err)
-
-	glfw.WindowHint(glfw.Resizable, glfw.False)
-	glfw.WindowHint(glfw.ContextVersionMajor, 4)
-	glfw.WindowHint(glfw.ContextVersionMinor, 1)
-	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
-	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
-	if !s.view {
-		glfw.WindowHint(glfw.Visible, glfw.False)
-	}
-	s.window, err = glfw.CreateWindow(width, height, "IRMF Slicer", nil, nil)
-	check("CreateWindow(%v,%v): %v", width, height, err)
-	s.window.MakeContextCurrent()
-
-	err = gl.Init()
-	check("gl.Init: %v", err)
-
-	version := gl.GoStr(gl.GetString(gl.VERSION))
-	fmt.Println("OpenGL version", version)
 }
 
 // XSliceProcessor represents a X slice processor.
@@ -169,8 +154,6 @@ func (s *Slicer) RenderXSlices(materialNum int, sp XSliceProcessor, order Order)
 		}
 	}
 
-	// log.Printf("RenderXSlices: numSlices=%v, startVal=%v, endVal=%v, delta=%v", numSlices, xFunc(0), xFunc(numSlices-1), s.delta)
-
 	for n := 0; n < numSlices; n++ {
 		x := xFunc(n)
 
@@ -215,8 +198,6 @@ func (s *Slicer) RenderYSlices(materialNum int, sp YSliceProcessor, order Order)
 		}
 	}
 
-	// log.Printf("RenderYSlices: numSlices=%v, startVal=%v, endVal=%v, delta=%v", numSlices, yFunc(0), yFunc(numSlices-1), s.delta)
-
 	for n := 0; n < numSlices; n++ {
 		y := yFunc(n)
 
@@ -256,8 +237,6 @@ func (s *Slicer) RenderZSlices(materialNum int, sp ZSliceProcessor, order Order)
 		}
 	}
 
-	// log.Printf("RenderZSlices: numSlices=%v, startVal=%v, endVal=%v, delta=%v", numSlices, zFunc(0), zFunc(numSlices-1), s.delta)
-
 	for n := 0; n < numSlices; n++ {
 		z := zFunc(n)
 
@@ -273,43 +252,10 @@ func (s *Slicer) RenderZSlices(materialNum int, sp ZSliceProcessor, order Order)
 }
 
 func (s *Slicer) renderSlice(sliceDepth float32, materialNum int) (image.Image, error) {
-	if e := gl.GetError(); e != gl.NO_ERROR {
-		fmt.Printf("renderSlice, before gl.Clear: GL ERROR: %v", e)
+	if s.renderer == nil {
+		return nil, fmt.Errorf("renderer not initialized")
 	}
-
-	gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-
-	// Render
-	gl.UseProgram(s.program)
-	gl.UniformMatrix4fv(s.modelUniform, 1, false, &s.model[0])
-	gl.Uniform1f(s.uSliceUniform, float32(sliceDepth))
-	gl.Uniform1i(s.uMaterialNumUniform, int32(materialNum))
-
-	gl.BindVertexArray(s.vao)
-
-	gl.DrawArrays(gl.TRIANGLES, 0, 2*3) // 6*2*3)
-
-	if e := gl.GetError(); e != gl.NO_ERROR {
-		fmt.Printf("renderSlice, after gl.DrawArrays: GL ERROR: %v", e)
-	}
-
-	width, height := s.window.GetFramebufferSize()
-	rgba := &image.RGBA{
-		Pix:    make([]uint8, width*height*4),
-		Stride: width * 4, // bytes between vertically adjacent pixels.
-		Rect:   image.Rect(0, 0, width, height),
-	}
-	gl.ReadPixels(0, 0, int32(width), int32(height), gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(&rgba.Pix[0]))
-
-	if e := gl.GetError(); e != gl.NO_ERROR {
-		fmt.Printf("renderSlice, after gl.ReadPixels: GL ERROR: %v", e)
-	}
-
-	// Maintenance
-	s.window.SwapBuffers()
-	glfw.PollEvents()
-
-	return rgba, nil
+	return s.renderer.Render(sliceDepth, materialNum)
 }
 
 // PrepareRenderX prepares the GPU to render along the X axis.
@@ -329,7 +275,6 @@ func (s *Slicer) PrepareRenderX() error {
 	aspectRatio := ((right - left) * s.deltaZ) / ((top - bottom) * s.deltaY)
 	newWidth := int(0.5 + (right-left)/float32(s.deltaY))
 	newHeight := int(0.5 + (top-bottom)/float32(s.deltaZ))
-	log.Printf("aspectRatio=%v, newWidth=%v, newHeight=%v", aspectRatio, newWidth, newHeight)
 	if aspectRatio*float32(newHeight) < float32(newWidth) {
 		newHeight = int(0.5 + float32(newWidth)/aspectRatio)
 	}
@@ -354,7 +299,6 @@ func (s *Slicer) PrepareRenderY() error {
 	aspectRatio := ((right - left) * s.deltaZ) / ((top - bottom) * s.deltaX)
 	newWidth := int(0.5 + (right-left)/float32(s.deltaX))
 	newHeight := int(0.5 + (top-bottom)/float32(s.deltaZ))
-	log.Printf("aspectRatio=%v, newWidth=%v, newHeight=%v", aspectRatio, newWidth, newHeight)
 	if aspectRatio*float32(newHeight) < float32(newWidth) {
 		newHeight = int(0.5 + float32(newWidth)/aspectRatio)
 	}
@@ -379,7 +323,6 @@ func (s *Slicer) PrepareRenderZ() error {
 	aspectRatio := ((right - left) * s.deltaY) / ((top - bottom) * s.deltaX)
 	newWidth := int(0.5 + (right-left)/float32(s.deltaX))
 	newHeight := int(0.5 + (top-bottom)/float32(s.deltaY))
-	log.Printf("aspectRatio=%v, newWidth=%v, newHeight=%v", aspectRatio, newWidth, newHeight)
 	if aspectRatio*float32(newHeight) < float32(newWidth) {
 		newHeight = int(0.5 + float32(newWidth)/aspectRatio)
 	}
@@ -393,145 +336,20 @@ func (s *Slicer) prepareRender(newWidth, newHeight int, left, right, bottom, top
 		newHeight++
 	}
 
-	// Create or resize window if necessary.
+	if s.renderer == nil {
+		return fmt.Errorf("renderer not initialized")
+	}
+
+	if err := s.renderer.Init(newWidth, newHeight, s.view); err != nil {
+		return err
+	}
+
 	near, far := float32(0.1), float32(100.0)
-	resize := (s.width != newWidth || s.height != newHeight)
-
-	log.Printf("prepareRender: (%v,%v)-(%v,%v), resize=%v", left, bottom, right, top, resize)
-	if s.window == nil || resize {
-		s.createOrResizeWindow(newWidth, newHeight)
-	}
-
-	// Configure the vertex and fragment shaders
-	var err error
-	if s.program, err = newProgram(vertexShader, fsHeader+s.irmf.Shader+genFooter(len(s.irmf.Materials), vec3Str)); err != nil {
-		return fmt.Errorf("newProgram: %v", err)
-	}
-
-	gl.UseProgram(s.program)
-
 	projection := mgl32.Ortho(left, right, bottom, top, near, far)
-	projectionUniform := gl.GetUniformLocation(s.program, gl.Str("projection\x00"))
-	gl.UniformMatrix4fv(projectionUniform, 1, false, &projection[0])
+	model := mgl32.Ident4()
 
-	cameraUniform := gl.GetUniformLocation(s.program, gl.Str("camera\x00"))
-	gl.UniformMatrix4fv(cameraUniform, 1, false, &camera[0])
-
-	s.model = mgl32.Ident4()
-	s.modelUniform = gl.GetUniformLocation(s.program, gl.Str("model\x00"))
-	gl.UniformMatrix4fv(s.modelUniform, 1, false, &s.model[0])
-
-	// Set up uniforms needed by shaders:
-	uSlice := float32(0)
-	s.uSliceUniform = gl.GetUniformLocation(s.program, gl.Str("u_slice\x00"))
-	gl.Uniform1f(s.uSliceUniform, uSlice)
-	uMaterialNum := int32(1)
-	s.uMaterialNumUniform = gl.GetUniformLocation(s.program, gl.Str("u_materialNum\x00"))
-	gl.Uniform1i(s.uMaterialNumUniform, uMaterialNum)
-
-	gl.BindFragDataLocation(s.program, 0, gl.Str("outputColor\x00"))
-
-	// Configure the vertex data
-	gl.GenVertexArrays(1, &s.vao)
-	gl.BindVertexArray(s.vao)
-
-	var vbo uint32
-	gl.GenBuffers(1, &vbo)
-	gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
-	gl.BufferData(gl.ARRAY_BUFFER, len(planeVertices)*4, gl.Ptr(planeVertices), gl.STATIC_DRAW)
-
-	vertAttrib := uint32(gl.GetAttribLocation(s.program, gl.Str("vert\x00")))
-	gl.EnableVertexAttribArray(vertAttrib)
-	gl.VertexAttribPointer(vertAttrib, 3, gl.FLOAT, false, 5*4, gl.PtrOffset(0))
-
-	// Configure global settings
-	gl.Enable(gl.DEPTH_TEST)
-	gl.DepthFunc(gl.LESS)
-	gl.ClearColor(0.0, 0.0, 0.0, 0.0)
-
-	return nil
+	return s.renderer.Prepare(s.irmf, vec3Str, planeVertices, projection, camera, model)
 }
-
-func newProgram(vertexShaderSource, fragmentShaderSource string) (uint32, error) {
-	vertexShader, err := compileShader(vertexShaderSource, gl.VERTEX_SHADER)
-	if err != nil {
-		return 0, err
-	}
-
-	fragmentShader, err := compileShader(fragmentShaderSource, gl.FRAGMENT_SHADER)
-	if err != nil {
-		return 0, err
-	}
-
-	program := gl.CreateProgram()
-
-	gl.AttachShader(program, vertexShader)
-	gl.AttachShader(program, fragmentShader)
-	gl.LinkProgram(program)
-
-	var status int32
-	gl.GetProgramiv(program, gl.LINK_STATUS, &status)
-	if status == gl.FALSE {
-		var logLength int32
-		gl.GetProgramiv(program, gl.INFO_LOG_LENGTH, &logLength)
-
-		log := strings.Repeat("\x00", int(logLength+1))
-		gl.GetProgramInfoLog(program, logLength, nil, gl.Str(log))
-
-		return 0, fmt.Errorf("failed to link program: %v", log)
-	}
-
-	gl.DeleteShader(vertexShader)
-	gl.DeleteShader(fragmentShader)
-
-	return program, nil
-}
-
-func compileShader(source string, shaderType uint32) (uint32, error) {
-	shader := gl.CreateShader(shaderType)
-
-	csources, free := gl.Strs(source)
-	gl.ShaderSource(shader, 1, csources, nil)
-	free()
-	gl.CompileShader(shader)
-
-	var status int32
-	gl.GetShaderiv(shader, gl.COMPILE_STATUS, &status)
-	if status == gl.FALSE {
-		var logLength int32
-		gl.GetShaderiv(shader, gl.INFO_LOG_LENGTH, &logLength)
-
-		log := strings.Repeat("\x00", int(logLength+1))
-		gl.GetShaderInfoLog(shader, logLength, nil, gl.Str(log))
-
-		return 0, fmt.Errorf("failed to compile %v: %v", source, log)
-	}
-
-	return shader, nil
-}
-
-const vertexShader = `
-#version 330
-uniform mat4 projection;
-uniform mat4 camera;
-uniform mat4 model;
-in vec3 vert;
-out vec3 fragVert;
-void main() {
-	gl_Position = projection * camera * model * vec4(vert, 1);
-	fragVert = vert;
-}
-` + "\x00"
-
-const fsHeader = `
-#version 330
-precision highp float;
-precision highp int;
-in vec3 fragVert;
-out vec4 outputColor;
-uniform float u_slice;
-uniform int u_materialNum;
-`
 
 var xPlaneVertices = []float32{
 	//  X, Y, Z, U, V
@@ -562,135 +380,3 @@ var zPlaneVertices = []float32{
 	1.0, 1.0, 0.0, 0.0, 1.0, // ur
 	-1.0, 1.0, 0.0, 1.0, 1.0, // ul
 }
-
-func check(fmtStr string, args ...interface{}) {
-	err := args[len(args)-1]
-	if err != nil {
-		log.Fatalf(fmtStr, args...)
-	}
-}
-
-func genFooter(numMaterials int, vec3Str string) string {
-	switch numMaterials {
-	default:
-		return fmt.Sprintf(fsFooterFmt4, vec3Str) + "\x00"
-	case 5, 6, 7, 8, 9:
-		return fmt.Sprintf(fsFooterFmt9, vec3Str) + "\x00"
-	case 10, 11, 12, 13, 14, 15, 16:
-		return fmt.Sprintf(fsFooterFmt16, vec3Str) + "\x00"
-	}
-}
-
-const fsFooterFmt4 = `
-void main() {
-  vec4 m;
-  mainModel4(m, vec3(%v));
-  switch(u_materialNum) {
-  case 1:
-    outputColor = vec4(m.x);
-    break;
-  case 2:
-    outputColor = vec4(m.y);
-    break;
-  case 3:
-    outputColor = vec4(m.z);
-    break;
-  case 4:
-    outputColor = vec4(m.w);
-    break;
-  }
-}
-`
-
-const fsFooterFmt9 = `
-void main() {
-  mat3 m;
-  mainModel9(m, vec3(%v));
-  switch(u_materialNum) {
-  case 1:
-    outputColor = vec4(m[0][0]);
-    break;
-  case 2:
-    outputColor = vec4(m[0][1]);
-    break;
-  case 3:
-    outputColor = vec4(m[0][2]);
-    break;
-  case 4:
-    outputColor = vec4(m[1][0]);
-    break;
-  case 5:
-    outputColor = vec4(m[1][1]);
-    break;
-  case 6:
-    outputColor = vec4(m[1][2]);
-    break;
-  case 7:
-    outputColor = vec4(m[2][0]);
-    break;
-  case 8:
-    outputColor = vec4(m[2][1]);
-    break;
-  case 9:
-    outputColor = vec4(m[2][2]);
-    break;
-  }
-}
-`
-
-const fsFooterFmt16 = `
-void main() {
-  mat4 m;
-  mainModel16(m, vec3(%v));
-  switch(u_materialNum) {
-  case 1:
-    outputColor = vec4(m[0][0]);
-    break;
-  case 2:
-    outputColor = vec4(m[0][1]);
-    break;
-  case 3:
-    outputColor = vec4(m[0][2]);
-    break;
-  case 4:
-    outputColor = vec4(m[0][3]);
-    break;
-  case 5:
-    outputColor = vec4(m[1][0]);
-    break;
-  case 6:
-    outputColor = vec4(m[1][1]);
-    break;
-  case 7:
-    outputColor = vec4(m[1][2]);
-    break;
-  case 8:
-    outputColor = vec4(m[1][3]);
-    break;
-  case 9:
-    outputColor = vec4(m[2][0]);
-    break;
-  case 10:
-    outputColor = vec4(m[2][1]);
-    break;
-  case 11:
-    outputColor = vec4(m[2][2]);
-    break;
-  case 12:
-    outputColor = vec4(m[2][3]);
-    break;
-  case 13:
-    outputColor = vec4(m[3][0]);
-    break;
-  case 14:
-    outputColor = vec4(m[3][1]);
-    break;
-  case 15:
-    outputColor = vec4(m[3][2]);
-    break;
-  case 16:
-    outputColor = vec4(m[3][3]);
-    break;
-  }
-}
-`

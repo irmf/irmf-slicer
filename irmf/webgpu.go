@@ -11,9 +11,10 @@ import (
 
 // WebGPURenderer is a renderer implementation using WebGPU.
 type WebGPURenderer struct {
-	width  int
-	height int
-	view   bool
+	width       int
+	height      int
+	view        bool
+	bytesPerRow uint32
 
 	instance *wgpu.Instance
 	adapter  *wgpu.Adapter
@@ -86,7 +87,7 @@ func (r *WebGPURenderer) Prepare(irmf *IRMF, vec3Str string, planeVertices []flo
 	}
 
 	// Uniforms
-	uniformData := make([]float32, 16*3+2) // 3 matrices + u_slice + u_materialNum (padded)
+	uniformData := make([]float32, 16*3+4) // 3 matrices + u_slice + u_materialNum + 2 floats padding
 	copy(uniformData[0:16], projection[:])
 	copy(uniformData[16:32], camera[:])
 	copy(uniformData[32:48], model[:])
@@ -205,9 +206,10 @@ func (r *WebGPURenderer) Prepare(irmf *IRMF, vec3Str string, planeVertices []flo
 	}
 
 	// Read buffer for capturing results
+	r.bytesPerRow = (uint32(r.width*4) + 255) &^ 255
 	r.readBuffer, err = r.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "Read Buffer",
-		Size:  uint64(r.width * r.height * 4),
+		Size:  uint64(r.bytesPerRow * uint32(r.height)),
 		Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
@@ -239,9 +241,13 @@ func (r *WebGPURenderer) Render(sliceDepth float32, materialNum int) (image.Imag
 	})
 	renderPass.SetPipeline(r.pipeline)
 	renderPass.SetBindGroup(0, r.bindGroup, nil)
-	renderPass.SetVertexBuffer(0, r.vertexBuffer, 0, 0)
+	renderPass.SetVertexBuffer(0, r.vertexBuffer, 0, r.vertexBuffer.GetSize())
 	renderPass.Draw(6, 1, 0, 0)
-	renderPass.End()
+	if err := renderPass.End(); err != nil {
+		renderPass.Release()
+		return nil, err
+	}
+	renderPass.Release()
 
 	// Copy texture to read buffer
 	encoder.CopyTextureToBuffer(
@@ -250,7 +256,7 @@ func (r *WebGPURenderer) Render(sliceDepth float32, materialNum int) (image.Imag
 			Buffer: r.readBuffer,
 			Layout: wgpu.TextureDataLayout{
 				Offset:       0,
-				BytesPerRow:  uint32(r.width * 4),
+				BytesPerRow:  r.bytesPerRow,
 				RowsPerImage: uint32(r.height),
 			},
 		},
@@ -272,7 +278,7 @@ func (r *WebGPURenderer) Render(sliceDepth float32, materialNum int) (image.Imag
 	// Map buffer and read image
 	done := make(chan struct{})
 	var mapStatus wgpu.BufferMapAsyncStatus
-	r.readBuffer.MapAsync(wgpu.MapModeRead, 0, uint64(r.width*r.height*4), func(status wgpu.BufferMapAsyncStatus) {
+	r.readBuffer.MapAsync(wgpu.MapModeRead, 0, uint64(r.bytesPerRow*uint32(r.height)), func(status wgpu.BufferMapAsyncStatus) {
 		mapStatus = status
 		close(done)
 	})
@@ -292,13 +298,18 @@ mapped:
 		return nil, fmt.Errorf("failed to map read buffer: %v", mapStatus)
 	}
 
-	data := r.readBuffer.GetMappedRange(0, uint(r.width*r.height*4))
+	data := r.readBuffer.GetMappedRange(0, uint(r.bytesPerRow*uint32(r.height)))
 	rgba := &image.RGBA{
-		Pix:    make([]uint8, len(data)),
+		Pix:    make([]uint8, r.width*r.height*4),
 		Stride: r.width * 4,
 		Rect:   image.Rect(0, 0, r.width, r.height),
 	}
-	copy(rgba.Pix, data)
+	for y := 0; y < r.height; y++ {
+		srcStart := uint32(y) * r.bytesPerRow
+		srcEnd := srcStart + uint32(r.width*4)
+		destStart := y * r.width * 4
+		copy(rgba.Pix[destStart:destStart+r.width*4], data[srcStart:srcEnd])
+	}
 	r.readBuffer.Unmap()
 
 	return rgba, nil
@@ -363,12 +374,7 @@ fn vs_main(@location(0) vert: vec3f) -> VertexOutput {
 `
 
 const wgslFSHeader = `
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-
-@fragment
-fn fs_main(@location(0) fragVert: vec3f) -> @location(0) vec4f {
-    let u_slice = uniforms.u_slice;
-    let u_materialNum = i32(uniforms.u_materialNum);
+// Fragment shader header
 `
 
 func genWGSLFooter(numMaterials int, vec3Str string) string {
@@ -385,6 +391,10 @@ func genWGSLFooter(numMaterials int, vec3Str string) string {
 }
 
 const wgslFSFooterFmt4 = `
+@fragment
+fn fs_main(@location(0) fragVert: vec3f) -> @location(0) vec4f {
+    let u_slice = uniforms.u_slice;
+    let u_materialNum = i32(uniforms.u_materialNum);
     let m = mainModel4(vec3f(%v));
     var color = 0.0;
     switch u_materialNum {
@@ -399,6 +409,10 @@ const wgslFSFooterFmt4 = `
 `
 
 const wgslFSFooterFmt9 = `
+@fragment
+fn fs_main(@location(0) fragVert: vec3f) -> @location(0) vec4f {
+    let u_slice = uniforms.u_slice;
+    let u_materialNum = i32(uniforms.u_materialNum);
     let m = mainModel9(vec3f(%v));
     var color = 0.0;
     switch u_materialNum {
@@ -418,6 +432,10 @@ const wgslFSFooterFmt9 = `
 `
 
 const wgslFSFooterFmt16 = `
+@fragment
+fn fs_main(@location(0) fragVert: vec3f) -> @location(0) vec4f {
+    let u_slice = uniforms.u_slice;
+    let u_materialNum = i32(uniforms.u_materialNum);
     let m = mainModel16(vec3f(%v));
     var color = 0.0;
     switch u_materialNum {

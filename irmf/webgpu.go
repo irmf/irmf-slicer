@@ -6,11 +6,14 @@ import (
 	"strings"
 
 	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/cogentcore/webgpu/wgpuglfw"
+	"github.com/go-gl/glfw/v3.3/glfw"
 	"github.com/go-gl/mathgl/mgl32"
 )
 
 // WebGPURenderer is a renderer implementation using WebGPU.
 type WebGPURenderer struct {
+	window      *glfw.Window
 	width       int
 	height      int
 	view        bool
@@ -22,20 +25,43 @@ type WebGPURenderer struct {
 	queue    *wgpu.Queue
 
 	pipeline      *wgpu.RenderPipeline
+	viewPipeline  *wgpu.RenderPipeline
 	bindGroup     *wgpu.BindGroup
 	vertexBuffer  *wgpu.Buffer
 	uniformBuffer *wgpu.Buffer
 	readBuffer    *wgpu.Buffer
 	targetTexture *wgpu.Texture
 	targetView    *wgpu.TextureView
+	surface       *wgpu.Surface
+	surfaceFormat wgpu.TextureFormat
 
 	irmf *IRMF
 }
 
 func (r *WebGPURenderer) Init(width, height int, view bool) error {
+	if r.window != nil && (r.width != width || r.height != height) {
+		r.Close()
+	}
 	r.width = width
 	r.height = height
 	r.view = view
+
+	if r.view && r.window == nil {
+		err := glfw.Init()
+		if err != nil {
+			return fmt.Errorf("glfw.Init: %v", err)
+		}
+
+		glfw.WindowHint(glfw.Resizable, glfw.False)
+		glfw.WindowHint(glfw.ClientAPI, glfw.NoAPI)
+		glfw.WindowHint(glfw.Visible, glfw.True)
+		r.window, err = glfw.CreateWindow(width, height, "IRMF Slicer (WebGPU)", nil, nil)
+		if err != nil {
+			return fmt.Errorf("CreateWindow(%v,%v): %v", width, height, err)
+		}
+		r.window.Show()
+		glfw.PollEvents()
+	}
 
 	if r.instance == nil {
 		r.instance = wgpu.CreateInstance(nil)
@@ -57,11 +83,22 @@ func (r *WebGPURenderer) Init(width, height int, view bool) error {
 		r.queue = r.device.GetQueue()
 	}
 
+	if r.view && r.surface == nil {
+		r.surface = r.instance.CreateSurface(wgpuglfw.GetSurfaceDescriptor(r.window))
+	}
+
 	return nil
 }
 
 func (r *WebGPURenderer) Prepare(irmf *IRMF, vec3Str string, planeVertices []float32, projection, camera, model mgl32.Mat4) error {
 	r.irmf = irmf
+
+	projection = mgl32.Mat4{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 0.5, 0,
+		0, 0, 0.5, 1,
+	}.Mul4(projection)
 
 	// Define WGSL shader
 	shaderSource := wgslVertexShader + wgslFSHeader + irmf.Shader + genWGSLFooter(len(irmf.Materials), vec3Str)
@@ -164,7 +201,21 @@ func (r *WebGPURenderer) Prepare(irmf *IRMF, vec3Str string, planeVertices []flo
 		return fmt.Errorf("failed to create texture view: %w", err)
 	}
 
-	// Pipeline
+	// Surface Configuration
+	if r.view {
+		capabilities := r.surface.GetCapabilities(r.adapter)
+		r.surfaceFormat = capabilities.Formats[0]
+		r.surface.Configure(r.adapter, r.device, &wgpu.SurfaceConfiguration{
+			Usage:       wgpu.TextureUsageRenderAttachment,
+			Format:      r.surfaceFormat,
+			Width:       uint32(r.width),
+			Height:      uint32(r.height),
+			PresentMode: wgpu.PresentModeFifo,
+			AlphaMode:   capabilities.AlphaModes[0],
+		})
+	}
+
+	// Pipelines
 	r.pipeline, err = r.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
 		Layout: pipelineLayout,
 		Vertex: wgpu.VertexState{
@@ -203,6 +254,48 @@ func (r *WebGPURenderer) Prepare(irmf *IRMF, vec3Str string, planeVertices []flo
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create render pipeline: %w", err)
+	}
+
+	if r.view {
+		r.viewPipeline, err = r.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
+			Layout: pipelineLayout,
+			Vertex: wgpu.VertexState{
+				Module:     shaderModule,
+				EntryPoint: "vs_main",
+				Buffers: []wgpu.VertexBufferLayout{
+					{
+						ArrayStride: 5 * 4,
+						Attributes: []wgpu.VertexAttribute{
+							{
+								Format:         wgpu.VertexFormatFloat32x3,
+								Offset:         0,
+								ShaderLocation: 0,
+							},
+						},
+					},
+				},
+			},
+			Fragment: &wgpu.FragmentState{
+				Module:     shaderModule,
+				EntryPoint: "fs_main",
+				Targets: []wgpu.ColorTargetState{
+					{
+						Format:    r.surfaceFormat,
+						WriteMask: wgpu.ColorWriteMaskAll,
+					},
+				},
+			},
+			Primitive: wgpu.PrimitiveState{
+				Topology: wgpu.PrimitiveTopologyTriangleList,
+			},
+			Multisample: wgpu.MultisampleState{
+				Count: 1,
+				Mask:  0xFFFFFFFF,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create view pipeline: %w", err)
+		}
 	}
 
 	// Read buffer for capturing results
@@ -249,6 +342,38 @@ func (r *WebGPURenderer) Render(sliceDepth float32, materialNum int) (image.Imag
 	}
 	renderPass.Release()
 
+	if r.view {
+		surfaceTexture, err := r.surface.GetCurrentTexture()
+		if err != nil {
+			return nil, err
+		}
+		surfaceView, err := surfaceTexture.CreateView(nil)
+		if err != nil {
+			return nil, err
+		}
+		defer surfaceView.Release()
+
+		renderPassView := encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
+			ColorAttachments: []wgpu.RenderPassColorAttachment{
+				{
+					View:       surfaceView,
+					LoadOp:     wgpu.LoadOpClear,
+					StoreOp:    wgpu.StoreOpStore,
+					ClearValue: wgpu.Color{R: 0, G: 0, B: 0, A: 0},
+				},
+			},
+		})
+		renderPassView.SetPipeline(r.viewPipeline)
+		renderPassView.SetBindGroup(0, r.bindGroup, nil)
+		renderPassView.SetVertexBuffer(0, r.vertexBuffer, 0, r.vertexBuffer.GetSize())
+		renderPassView.Draw(6, 1, 0, 0)
+		if err := renderPassView.End(); err != nil {
+			renderPassView.Release()
+			return nil, err
+		}
+		renderPassView.Release()
+	}
+
 	// Copy texture to read buffer
 	encoder.CopyTextureToBuffer(
 		r.targetTexture.AsImageCopy(),
@@ -274,6 +399,10 @@ func (r *WebGPURenderer) Render(sliceDepth float32, materialNum int) (image.Imag
 	r.queue.Submit(commandBuffer)
 	commandBuffer.Release()
 	encoder.Release()
+
+	if r.view {
+		r.surface.Present()
+	}
 
 	// Map buffer and read image
 	done := make(chan struct{})
@@ -312,39 +441,66 @@ mapped:
 	}
 	r.readBuffer.Unmap()
 
+	if r.view {
+		glfw.PollEvents()
+	}
+
 	return rgba, nil
 }
 
 func (r *WebGPURenderer) Close() {
+	if r.window != nil {
+		r.window.Destroy()
+		glfw.Terminate()
+		r.window = nil
+	}
 	if r.readBuffer != nil {
 		r.readBuffer.Release()
+		r.readBuffer = nil
 	}
 	if r.targetTexture != nil {
 		r.targetTexture.Release()
+		r.targetTexture = nil
 	}
 	if r.targetView != nil {
 		r.targetView.Release()
+		r.targetView = nil
 	}
 	if r.vertexBuffer != nil {
 		r.vertexBuffer.Release()
+		r.vertexBuffer = nil
 	}
 	if r.uniformBuffer != nil {
 		r.uniformBuffer.Release()
+		r.uniformBuffer = nil
 	}
 	if r.pipeline != nil {
 		r.pipeline.Release()
+		r.pipeline = nil
+	}
+	if r.viewPipeline != nil {
+		r.viewPipeline.Release()
+		r.viewPipeline = nil
 	}
 	if r.bindGroup != nil {
 		r.bindGroup.Release()
+		r.bindGroup = nil
+	}
+	if r.surface != nil {
+		r.surface.Release()
+		r.surface = nil
 	}
 	if r.device != nil {
 		r.device.Release()
+		r.device = nil
 	}
 	if r.adapter != nil {
 		r.adapter.Release()
+		r.adapter = nil
 	}
 	if r.instance != nil {
 		r.instance.Release()
+		r.instance = nil
 	}
 }
 

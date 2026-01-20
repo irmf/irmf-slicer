@@ -7,10 +7,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-    - uses: actions/checkout@v3
-    - uses: actions/setup-go@v4
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
       with:
-        go-version: 1.20.x
+        go-version: 1.25.x
 
     - name: Get GLFW dependencies - https://github.com/go-gl/glfw/blob/master/README.md
       run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
